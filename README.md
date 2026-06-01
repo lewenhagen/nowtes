@@ -38,16 +38,15 @@ Add these lines to your Hyprland config. In omarchy this is typically
 
 ```ini
 # Window rules
-windowrulev2 = float, class:^(nowtes)$
-windowrulev2 = size 900 600, class:^(nowtes)$
-windowrulev2 = center, class:^(nowtes)$
-windowrulev2 = workspace special:nowtes, class:^(nowtes)$
+windowrule = float on, match:class nowtes
+windowrule = size 900 600, match:class nowtes
+windowrule = workspace special:nowtes silent, match:class nowtes
 
 # Keybinding
-bind = SUPER, N, exec, ~/.local/bin/nowtes-toggle
+bindd = SUPER, N, Nowtes, exec, ~/.local/bin/nowtes-toggle
 ```
 
-Reload Hyprland (`SUPER+SHIFT+R` or `hyprctl reload`) and press `SUPER+N`.
+Reload Hyprland (`hyprctl reload`) and press `SUPER+N`.
 
 ## Keybindings
 
