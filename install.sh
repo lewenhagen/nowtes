@@ -16,14 +16,14 @@ cp "$SCRIPT_DIR/nowtes-toggle" "$BIN_DIR/nowtes-toggle"
 chmod +x "$BIN_DIR/nowtes-toggle"
 
 echo "Installing Python dependencies..."
-if command -v pacman &>/dev/null; then
-    sudo pacman -S --noconfirm python-textual
-elif command -v pip &>/dev/null; then
-    pip install --user textual
+if python3 -c "import textual" 2>/dev/null; then
+    echo "textual already installed, skipping."
+elif command -v pacman &>/dev/null; then
+    sudo pacman -S --noconfirm python-textual || \
+        pip install --break-system-packages textual
 else
-    echo "Could not install textual automatically. Install it manually:"
-    echo "  Arch: sudo pacman -S python-textual"
-    echo "  Other: pip install --user textual"
+    pip install --user textual 2>/dev/null || \
+        pip install --break-system-packages textual
 fi
 
 echo ""
