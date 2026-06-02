@@ -2,15 +2,25 @@
 """Nowtes - A simple todo app for Hyprland/omarchy"""
 
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Container
+from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static
 
 DATA_DIR = Path.home() / ".local" / "share" / "nowtes"
 DATA_FILE = DATA_DIR / "todos.json"
+
+_SOUND_FILES = [
+    "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga",
+    "/usr/share/sounds/freedesktop/stereo/bell.oga",
+    "/usr/share/sounds/freedesktop/stereo/complete.oga",
+]
+_SOUND_PLAYERS = ["paplay", "pw-play", "aplay"]
 
 
 def load_todos() -> list:
@@ -27,6 +37,121 @@ def save_todos(todos: list) -> None:
     DATA_FILE.write_text(json.dumps(todos, indent=2))
 
 
+def parse_remind_at(text: str) -> str | None:
+    text = text.strip()
+    if not text:
+        return None
+    for fmt in ("%H:%M", "%Y-%m-%d %H:%M"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            if fmt == "%H:%M":
+                today = datetime.now().date()
+                dt = dt.replace(year=today.year, month=today.month, day=today.day)
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+    return None
+
+
+def play_sound() -> None:
+    for sound in _SOUND_FILES:
+        if Path(sound).exists():
+            for player in _SOUND_PLAYERS:
+                try:
+                    subprocess.Popen(
+                        [player, sound],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    return
+                except FileNotFoundError:
+                    continue
+    print("\a", end="", flush=True)
+
+
+def send_notification(text: str) -> None:
+    try:
+        subprocess.Popen(
+            ["notify-send", "-u", "critical", "-t", "0", "Nowtes Reminder", text],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        pass
+
+
+class AlarmScreen(ModalScreen):
+    BINDINGS = [
+        Binding("escape", "dismiss_alarm", show=False),
+        Binding("enter", "dismiss_alarm", show=False),
+        Binding("space", "dismiss_alarm", show=False),
+    ]
+
+    CSS = """
+    AlarmScreen {
+        align: center middle;
+    }
+
+    #alarm-box {
+        width: 64;
+        height: 11;
+        border: heavy $error;
+        background: $error 25%;
+        padding: 1 4;
+        align: center middle;
+    }
+
+    #alarm-box.flash {
+        background: $error 60%;
+        border: heavy $warning;
+    }
+
+    #alarm-title {
+        text-align: center;
+        text-style: bold;
+        color: $error;
+        width: 1fr;
+        margin-bottom: 1;
+    }
+
+    #alarm-box.flash #alarm-title {
+        color: $warning;
+    }
+
+    #alarm-text {
+        text-align: center;
+        color: $text;
+        width: 1fr;
+        margin-bottom: 1;
+    }
+
+    #alarm-dismiss {
+        text-align: center;
+        color: $text-muted;
+        width: 1fr;
+    }
+    """
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.todo_text = text
+
+    def compose(self) -> ComposeResult:
+        with Container(id="alarm-box"):
+            yield Label("! REMINDER !", id="alarm-title")
+            yield Label(self.todo_text, id="alarm-text")
+            yield Label("Enter / Space / Esc to dismiss", id="alarm-dismiss")
+
+    def on_mount(self) -> None:
+        self.set_interval(0.5, self._toggle_flash)
+
+    def _toggle_flash(self) -> None:
+        self.query_one("#alarm-box").toggle_class("flash")
+
+    def action_dismiss_alarm(self) -> None:
+        self.dismiss()
+
+
 class TodoItem(ListItem):
     def __init__(self, todo: dict) -> None:
         super().__init__()
@@ -36,7 +161,9 @@ class TodoItem(ListItem):
 
     def compose(self) -> ComposeResult:
         icon = "✓" if self.todo["done"] else "○"
-        yield Label(f" {icon}  {self.todo['created_at']}  {self.todo['text']}")
+        remind_at = self.todo.get("remind_at")
+        remind = f"  @{remind_at[11:16]}" if remind_at else ""
+        yield Label(f" {icon}  {self.todo['created_at']}{remind}  {self.todo['text']}")
 
 
 class NowApp(App):
@@ -69,7 +196,7 @@ class NowApp(App):
     }
 
     Input {
-        margin: 0 2 1 2;
+        margin: 0 2 0 2;
         display: none;
     }
 
@@ -95,13 +222,19 @@ class NowApp(App):
     def __init__(self) -> None:
         super().__init__()
         self.todos = load_todos()
+        self._pending_text = ""
+        self._input_step = 0  # 0=idle, 1=entering text, 2=entering remind time
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield ListView(id="list")
         yield Input(
-            placeholder="New todo… Enter to save, Esc to cancel",
-            id="input",
+            placeholder="New todo… Enter to continue, Esc to cancel",
+            id="input-text",
+        )
+        yield Input(
+            placeholder="Remind at: HH:MM or YYYY-MM-DD HH:MM  (empty to skip)",
+            id="input-remind",
         )
         yield Static("n:New  d:Delete  Space:Toggle done  q:Quit", id="hint")
         yield Footer()
@@ -109,6 +242,8 @@ class NowApp(App):
     def on_mount(self) -> None:
         self._refresh()
         self.query_one(ListView).focus()
+        self.set_interval(30, self._check_reminders)
+        self.call_after_refresh(self._check_reminders)
 
     def _refresh(self, keep_index: int | None = None) -> None:
         lv = self.query_one(ListView)
@@ -118,29 +253,67 @@ class NowApp(App):
         if keep_index is not None and self.todos:
             lv.index = min(keep_index, len(self.todos) - 1)
 
+    def _check_reminders(self) -> None:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        changed = False
+        for todo in self.todos:
+            if (
+                todo.get("remind_at")
+                and not todo.get("done")
+                and not todo.get("fired")
+                and todo["remind_at"] <= now
+            ):
+                todo["fired"] = True
+                changed = True
+                self._trigger_alarm(todo["text"])
+        if changed:
+            save_todos(self.todos)
+            self._refresh()
+
+    def _trigger_alarm(self, text: str) -> None:
+        play_sound()
+        send_notification(text)
+        self.push_screen(AlarmScreen(text))
+
     def action_new(self) -> None:
-        inp = self.query_one(Input)
+        self.action_cancel()
+        self._input_step = 1
+        inp = self.query_one("#input-text", Input)
         inp.add_class("input-visible")
         inp.focus()
 
     def action_cancel(self) -> None:
-        inp = self.query_one(Input)
-        if "input-visible" in inp.classes:
+        self._input_step = 0
+        self._pending_text = ""
+        for inp_id in ("#input-text", "#input-remind"):
+            inp = self.query_one(inp_id, Input)
             inp.value = ""
             inp.remove_class("input-visible")
-            self.query_one(ListView).focus()
+        self.query_one(ListView).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        text = event.value.strip()
-        if text:
+        if self._input_step == 1:
+            text = event.value.strip()
+            if not text:
+                self.action_cancel()
+                return
+            self._pending_text = text
+            self._input_step = 2
+            self.query_one("#input-text", Input).remove_class("input-visible")
+            inp_remind = self.query_one("#input-remind", Input)
+            inp_remind.add_class("input-visible")
+            inp_remind.focus()
+        elif self._input_step == 2:
+            remind_at = parse_remind_at(event.value)
             self.todos.append({
-                "text": text,
+                "text": self._pending_text,
                 "done": False,
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "remind_at": remind_at,
             })
             save_todos(self.todos)
             self._refresh(keep_index=len(self.todos) - 1)
-        self.action_cancel()
+            self.action_cancel()
 
     def action_delete(self) -> None:
         lv = self.query_one(ListView)
