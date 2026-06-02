@@ -15,8 +15,37 @@ except Exception:
 "
 }
 
+_is_visible() {
+    hyprctl monitors -j 2>/dev/null | python3 -c "
+import sys, json
+try:
+    monitors = json.load(sys.stdin)
+    sys.exit(0 if any(m.get('specialWorkspace', {}).get('name') == 'special:${APPCLASS}' for m in monitors) else 1)
+except Exception:
+    sys.exit(1)
+"
+}
+
+_on_special_workspace() {
+    hyprctl clients -j 2>/dev/null | python3 -c "
+import sys, json
+try:
+    clients = json.load(sys.stdin)
+    sys.exit(0 if any(c.get('class') == '${APPCLASS}' and c.get('workspace', {}).get('name') == 'special:${APPCLASS}' for c in clients) else 1)
+except Exception:
+    sys.exit(1)
+"
+}
+
 if _client_exists; then
-    hyprctl dispatch togglespecialworkspace "$APPCLASS"
+    if ! _on_special_workspace; then
+        hyprctl dispatch movetoworkspacesilent "special:${APPCLASS},class:${APPCLASS}"
+    fi
+    if _is_visible; then
+        hyprctl dispatch togglespecialworkspace "$APPCLASS"
+    else
+        hyprctl --batch "dispatch togglespecialworkspace ${APPCLASS} ; dispatch centerwindow"
+    fi
 else
     "$TERMINAL" --app-id="$APPCLASS" -e python3 "$APP" &
 
