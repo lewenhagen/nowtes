@@ -4,6 +4,12 @@ APPCLASS="nowtes"
 TERMINAL="${NOWTES_TERMINAL:-foot}"
 APP="$HOME/.local/share/nowtes/nowtes.py"
 
+# foot/wezterm use --app-id; alacritty/kitty/ghostty use --class
+case "$TERMINAL" in
+    alacritty|kitty|ghostty) CLASS_OPT="--class" ;;
+    *)                        CLASS_OPT="--app-id" ;;
+esac
+
 _client_exists() {
     hyprctl clients -j 2>/dev/null | python3 -c "
 import sys, json
@@ -47,7 +53,7 @@ if _client_exists; then
         hyprctl --batch "dispatch togglespecialworkspace ${APPCLASS} ; dispatch centerwindow"
     fi
 else
-    "$TERMINAL" --app-id="$APPCLASS" -e python3 "$APP" &
+    "$TERMINAL" "$CLASS_OPT=$APPCLASS" -e python3 "$APP" &
 
     # Wait for window to appear (window rule places it in special workspace silently)
     # then show it on the focused monitor and center it there
