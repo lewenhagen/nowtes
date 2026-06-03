@@ -2,10 +2,14 @@
 """Nowtes - A simple todo app for Hyprland/omarchy"""
 
 import json
+import re
 import subprocess
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
+from rich.style import Style
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
@@ -14,6 +18,22 @@ from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, St
 
 DATA_DIR = Path.home() / ".local" / "share" / "nowtes"
 DATA_FILE = DATA_DIR / "todos.json"
+
+LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+
+
+def render_note(text: str) -> Text:
+    """Parse [name](url) markdown links into Rich Text with OSC 8 hyperlinks."""
+    result = Text()
+    last_end = 0
+    for m in LINK_RE.finditer(text):
+        if m.start() > last_end:
+            result.append(text[last_end:m.start()])
+        result.append(m.group(1), style=Style(link=m.group(2), underline=True))
+        last_end = m.end()
+    if last_end < len(text):
+        result.append(text[last_end:])
+    return result
 
 _SOUND_FILES = [
     "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga",
@@ -163,7 +183,9 @@ class TodoItem(ListItem):
         icon = "✓" if self.todo["done"] else "○"
         remind_at = self.todo.get("remind_at")
         remind = f"  @{remind_at[11:16]}" if remind_at else ""
-        yield Label(f" {icon}  {self.todo['created_at']}{remind}  {self.todo['text']}")
+        label = Text(f" {icon}  {self.todo['created_at']}{remind}  ")
+        label.append_text(render_note(self.todo["text"]))
+        yield Label(label)
 
 
 class NowApp(App):
@@ -215,6 +237,8 @@ class NowApp(App):
         Binding("n", "new", "New", show=True),
         Binding("d", "delete", "Delete", show=True),
         Binding("space", "toggle", "Toggle Done", show=True),
+        Binding("o", "open_links", "Open Link", show=True),
+        Binding("c", "copy_note", "Copy", show=True),
         Binding("q", "quit", "Quit", show=True),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
@@ -236,7 +260,7 @@ class NowApp(App):
             placeholder="Remind at: HH:MM or YYYY-MM-DD HH:MM  (empty to skip)",
             id="input-remind",
         )
-        yield Static("n:New  d:Delete  Space:Toggle done  q:Quit", id="hint")
+        yield Static("n:New  d:Delete  Space:Toggle  o:Open link  c:Copy  q:Quit", id="hint")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -291,6 +315,24 @@ class NowApp(App):
             inp.remove_class("input-visible")
         self.query_one(ListView).focus()
 
+    def on_key(self, event) -> None:
+        if event.key == "ctrl+v" and self._input_step > 0:
+            inp_id = "#input-text" if self._input_step == 1 else "#input-remind"
+            inp = self.query_one(inp_id, Input)
+            try:
+                result = subprocess.run(
+                    ["wl-paste", "--no-newline"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                if result.returncode == 0 and result.stdout:
+                    pos = inp.cursor_position
+                    inp.value = inp.value[:pos] + result.stdout + inp.value[pos:]
+                    inp.cursor_position = pos + len(result.stdout)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if self._input_step == 1:
             text = event.value.strip()
@@ -314,6 +356,28 @@ class NowApp(App):
             save_todos(self.todos)
             self._refresh(keep_index=len(self.todos) - 1)
             self.action_cancel()
+
+    def action_open_links(self) -> None:
+        lv = self.query_one(ListView)
+        idx = lv.index
+        if idx is not None and 0 <= idx < len(self.todos):
+            for _, url in LINK_RE.findall(self.todos[idx]["text"]):
+                webbrowser.open_new_tab(url)
+
+    def action_copy_note(self) -> None:
+        lv = self.query_one(ListView)
+        idx = lv.index
+        if idx is not None and 0 <= idx < len(self.todos):
+            text = self.todos[idx]["text"]
+            try:
+                subprocess.run(
+                    ["wl-copy"],
+                    input=text.encode(),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except FileNotFoundError:
+                pass
 
     def action_delete(self) -> None:
         lv = self.query_one(ListView)
