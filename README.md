@@ -11,7 +11,7 @@ A minimal todo/notes TUI for [Hyprland](https://hyprland.org/) and [omarchy](htt
 └─────────────────────────────────────────────────────┘
   New todo… Enter to save, Esc to cancel
 
-  n:New  d:Delete  Space:Toggle done  q:Quit
+  n:New  d:Delete  Space:Toggle  o:Open link  c:Copy  q:Quit
 ```
 
 ## Requirements
@@ -24,7 +24,7 @@ A minimal todo/notes TUI for [Hyprland](https://hyprland.org/) and [omarchy](htt
 ## Install
 
 ```bash
-git clone https://github.com/yourname/nowtes
+git clone https://github.com/lewenhagen/nowtes
 cd nowtes
 bash install.sh
 ```
