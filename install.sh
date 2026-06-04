@@ -4,40 +4,209 @@ set -e
 INSTALL_DIR="$HOME/.local/share/nowtes"
 BIN_DIR="$HOME/.local/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HYPR_CONF="$HOME/.config/hypr/hyprland.conf"
+APPCLASS="nowtes"
 
-echo "Installing Nowtes..."
+# --- Colors ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
 
-mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+info()  { echo -e "${CYAN}::${NC} $*"; }
+ok()    { echo -e "${GREEN}✓${NC} $*"; }
+warn()  { echo -e "${YELLOW}!${NC} $*"; }
+err()   { echo -e "${RED}✗${NC} $*"; }
 
-cp "$SCRIPT_DIR/nowtes.py" "$INSTALL_DIR/nowtes.py"
-chmod +x "$INSTALL_DIR/nowtes.py"
+# --- Pre-flight checks ---
+echo -e "${BOLD}Installing Nowtes${NC}"
+echo ""
 
-cp "$SCRIPT_DIR/nowtes-toggle" "$BIN_DIR/nowtes-toggle"
-chmod +x "$BIN_DIR/nowtes-toggle"
+if ! command -v hyprctl &>/dev/null; then
+    err "Hyprland not found. Nowtes requires Hyprland."
+    exit 1
+fi
+ok "Hyprland detected"
 
-echo "Installing Python dependencies..."
-if python3 -c "import textual" 2>/dev/null; then
-    echo "textual already installed, skipping."
-elif command -v pacman &>/dev/null; then
-    sudo pacman -S --noconfirm python-textual || \
-        pip install --break-system-packages textual
-else
-    pip install --user textual 2>/dev/null || \
-        pip install --break-system-packages textual
+if ! command -v python3 &>/dev/null; then
+    err "python3 not found."
+    exit 1
+fi
+ok "Python 3 detected"
+
+# --- Detect terminal ---
+TERMINAL=""
+for t in foot ghostty alacritty kitty; do
+    if command -v "$t" &>/dev/null; then
+        TERMINAL="$t"
+        break
+    fi
+done
+
+if [ -z "$TERMINAL" ]; then
+    err "No supported terminal found (foot, ghostty, alacritty, kitty)."
+    exit 1
+fi
+ok "Terminal: ${BOLD}$TERMINAL${NC}"
+
+# --- Detect omarchy ---
+OMARCHY=false
+if [ -d "$HOME/.local/share/omarchy" ]; then
+    OMARCHY=true
+    ok "Omarchy detected"
 fi
 
+# --- Install files ---
+info "Installing files..."
+mkdir -p "$INSTALL_DIR" "$BIN_DIR"
+cp "$SCRIPT_DIR/nowtes.py" "$INSTALL_DIR/nowtes.py"
+chmod +x "$INSTALL_DIR/nowtes.py"
+cp "$SCRIPT_DIR/nowtes-toggle" "$BIN_DIR/nowtes-toggle"
+chmod +x "$BIN_DIR/nowtes-toggle"
+ok "Files installed"
+
+# --- Install Python dependencies ---
+info "Checking Python dependencies..."
+if python3 -c "import textual" 2>/dev/null; then
+    ok "textual already installed"
+elif command -v pacman &>/dev/null; then
+    info "Installing textual via pacman..."
+    sudo pacman -S --noconfirm python-textual || pip install --break-system-packages textual
+    ok "textual installed"
+elif command -v apt-get &>/dev/null; then
+    info "Installing textual via pip..."
+    pip install --user textual 2>/dev/null || pip install --break-system-packages textual
+    ok "textual installed"
+else
+    pip install --user textual 2>/dev/null || pip install --break-system-packages textual
+    ok "textual installed"
+fi
+
+# --- Detect binding conflicts ---
+_find_bind_conflict() {
+    local mod="$1" key="$2" desc=""
+    local pattern
+    if [ "$mod" = "SUPER" ]; then
+        pattern="^[[:space:]]*bindd\?[[:space:]]*=[[:space:]]*SUPER,[[:space:]]*${key},"
+    else
+        pattern="^[[:space:]]*bindd\?[[:space:]]*=[[:space:]]*SUPER SHIFT,[[:space:]]*${key},"
+    fi
+    local match
+    match=$(grep -rh "$pattern" \
+        "$HOME/.local/share/omarchy/default/hypr/" \
+        "$HOME/.config/hypr/" \
+        2>/dev/null | grep -v "nowtes" | head -1 || true)
+    if [ -n "$match" ]; then
+        desc=$(echo "$match" | sed -n 's/.*bindd = [^,]*, [^,]*, \([^,]*\),.*/\1/p')
+        [ -z "$desc" ] && desc="unknown"
+        echo "$desc"
+    fi
+}
+
 echo ""
-echo "Done! Add these lines to your Hyprland config:"
+CONFLICT_SUPER=$(_find_bind_conflict "SUPER" "N")
+CONFLICT_SHIFT=$(_find_bind_conflict "SUPER SHIFT" "N")
+
+HAS_CONFLICTS=false
+if [ -n "$CONFLICT_SUPER" ] || [ -n "$CONFLICT_SHIFT" ]; then
+    HAS_CONFLICTS=true
+fi
+
+info "Keybinding selection:"
 echo ""
-echo "  # Window rules (add near your other windowrule lines)"
-echo "  windowrule = float on, match:class nowtes"
-echo "  windowrule = size 900 600, match:class nowtes"
-echo "  windowrule = center, match:class nowtes"
-echo "  windowrule = workspace special:nowtes silent, match:class nowtes"
+
+OPT1_NOTE=""
+OPT2_NOTE=""
+[ -n "$CONFLICT_SUPER" ] && OPT1_NOTE=" (replaces ${BOLD}${CONFLICT_SUPER}${NC})"
+[ -n "$CONFLICT_SHIFT" ] && OPT2_NOTE=" (replaces ${BOLD}${CONFLICT_SHIFT}${NC})"
+
+echo -e "  1) ${BOLD}SUPER + N${NC}${OPT1_NOTE}"
+echo -e "  2) ${BOLD}SUPER + SHIFT + N${NC}${OPT2_NOTE}"
 echo ""
-echo "  # Keybinding (add near your other bind lines)"
-echo "  bindd = SUPER, N, Nowtes, exec, ~/.local/bin/nowtes-toggle"
+
+if [ -n "$CONFLICT_SUPER" ] && [ -z "$CONFLICT_SHIFT" ]; then
+    DEFAULT=2
+elif [ -z "$CONFLICT_SUPER" ]; then
+    DEFAULT=1
+else
+    DEFAULT=1
+fi
+
+read -rp "Choose keybinding [1/2] (default: $DEFAULT): " BIND_CHOICE
+BIND_CHOICE="${BIND_CHOICE:-$DEFAULT}"
+
+case "$BIND_CHOICE" in
+    1)
+        BIND_MOD="SUPER"
+        BIND_KEY="N"
+        NEEDS_UNBIND=$( [ -n "$CONFLICT_SUPER" ] && echo true || echo false )
+        ok "Keybinding: SUPER + N"
+        ;;
+    *)
+        BIND_MOD="SUPER SHIFT"
+        BIND_KEY="N"
+        NEEDS_UNBIND=$( [ -n "$CONFLICT_SHIFT" ] && echo true || echo false )
+        ok "Keybinding: SUPER + SHIFT + N"
+        ;;
+esac
+
+# --- Configure Hyprland ---
 echo ""
+info "Configuring Hyprland..."
+
+if [ ! -f "$HYPR_CONF" ]; then
+    err "Hyprland config not found at $HYPR_CONF"
+    echo "Add these lines manually to your Hyprland config:"
+    echo ""
+    echo "  windowrule = float on, match:class $APPCLASS"
+    echo "  windowrule = size 900 600, match:class $APPCLASS"
+    echo "  windowrule = center 1, match:class $APPCLASS"
+    echo "  windowrule = workspace special:$APPCLASS silent, match:class $APPCLASS"
+    $NEEDS_UNBIND && echo "  unbind = $BIND_MOD, N"
+    echo "  bindd = $BIND_MOD, $BIND_KEY, Nowtes, exec, $BIN_DIR/nowtes-toggle"
+    exit 0
+fi
+
+# Remove any previous nowtes config block (idempotent reinstall)
+if grep -q "match:class $APPCLASS\|nowtes-toggle" "$HYPR_CONF"; then
+    info "Removing previous Nowtes config..."
+    sed -i "/# >>> Nowtes/,/# <<< Nowtes/d" "$HYPR_CONF" 2>/dev/null || true
+    sed -i "/match:class ${APPCLASS}/d" "$HYPR_CONF"
+    sed -i "/nowtes-toggle/d" "$HYPR_CONF"
+    sed -i "/unbind.*# nowtes/d" "$HYPR_CONF"
+    # Clean up trailing blank lines
+    sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$HYPR_CONF"
+fi
+
+# Append new config block
+{
+    echo ""
+    echo "# >>> Nowtes"
+    echo "windowrule = float on, match:class $APPCLASS"
+    echo "windowrule = size 900 600, match:class $APPCLASS"
+    echo "windowrule = center 1, match:class $APPCLASS"
+    echo "windowrule = workspace special:$APPCLASS silent, match:class $APPCLASS"
+    $NEEDS_UNBIND && echo "unbind = $BIND_MOD, N  # nowtes"
+    echo "bindd = $BIND_MOD, $BIND_KEY, Nowtes, exec, $BIN_DIR/nowtes-toggle"
+    echo "# <<< Nowtes"
+} >> "$HYPR_CONF"
+ok "Hyprland config updated"
+
+# --- Reload Hyprland ---
+if hyprctl reload &>/dev/null; then
+    ok "Hyprland reloaded"
+else
+    warn "Could not reload Hyprland — reload manually with: hyprctl reload"
+fi
+
+# --- Done ---
+echo ""
+echo -e "${GREEN}${BOLD}Nowtes installed!${NC}"
+BIND_DISPLAY="SUPER + $BIND_KEY"
+[ "$BIND_MOD" = "SUPER SHIFT" ] && BIND_DISPLAY="SUPER + SHIFT + $BIND_KEY"
+echo -e "Press ${BOLD}$BIND_DISPLAY${NC} to toggle."
+echo ""
+echo "Data is stored in $INSTALL_DIR/todos.json"
 echo "To use a different terminal, set NOWTES_TERMINAL in your environment."
-echo "Default is 'foot'. Supported: foot, alacritty, kitty, ghostty."
-echo "The --app-id/--class flag is chosen automatically."

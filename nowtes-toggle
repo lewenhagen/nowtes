@@ -1,7 +1,22 @@
 #!/bin/bash
 # Toggle the Nowtes window via Hyprland special workspace
 APPCLASS="nowtes"
-TERMINAL="${NOWTES_TERMINAL:-foot}"
+if [ -n "${NOWTES_TERMINAL:-}" ]; then
+      TERMINAL="$NOWTES_TERMINAL"
+  else
+      TERMINAL=""
+      for _t in foot ghostty alacritty kitty; do
+          if command -v "$_t" &>/dev/null; then
+              TERMINAL="$_t"
+              break
+          fi
+      done
+      if [ -z "$TERMINAL" ]; then
+          notify-send -u critical "Nowtes" "No supported terminal found (foot, ghostty, alacritty, kitty)"
+  2>/dev/null
+          exit 1
+      fi
+  fi
 APP="$HOME/.local/share/nowtes/nowtes.py"
 
 # foot/wezterm use --app-id; alacritty/kitty/ghostty use --class
