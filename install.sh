@@ -5,7 +5,9 @@ INSTALL_DIR="$HOME/.local/share/nowtes"
 BIN_DIR="$HOME/.local/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HYPR_CONF="$HOME/.config/hypr/hyprland.conf"
-APPCLASS="nowtes"
+HYPR_LUA="$HOME/.config/hypr/hyprland.lua"
+BINDINGS_LUA="$HOME/.config/hypr/bindings.lua"
+APPCLASS="io.nowtes"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -58,6 +60,13 @@ if [ -d "$HOME/.local/share/omarchy" ]; then
     ok "Omarchy detected"
 fi
 
+# --- Detect Hyprland config system ---
+LUA_MODE=false
+if [ -f "$HYPR_LUA" ]; then
+    LUA_MODE=true
+    ok "Hyprland Lua config detected (Omarchy v4+)"
+fi
+
 # --- Install files ---
 info "Installing files..."
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
@@ -87,21 +96,41 @@ fi
 # --- Detect binding conflicts ---
 _find_bind_conflict() {
     local mod="$1" key="$2" desc=""
-    local pattern
-    if [ "$mod" = "SUPER" ]; then
-        pattern="^[[:space:]]*bindd\?[[:space:]]*=[[:space:]]*SUPER,[[:space:]]*${key},"
+
+    if $LUA_MODE; then
+        local lua_key
+        if [ "$mod" = "SUPER" ]; then
+            lua_key="SUPER + ${key}"
+        else
+            lua_key="SUPER + SHIFT + ${key}"
+        fi
+        local match
+        match=$(grep -rh "\"${lua_key}\"" \
+            "$HOME/.local/share/omarchy/default/hypr/" \
+            "$HOME/.config/hypr/" \
+            2>/dev/null | grep -v "[Nn]owtes\|^[[:space:]]*--\|hl\.unbind" | head -1 || true)
+        if [ -n "$match" ]; then
+            desc=$(echo "$match" | sed -n 's/.*o\.bind([^,]*, *"\([^"]*\)".*/\1/p')
+            [ -z "$desc" ] && desc="unknown"
+            echo "$desc"
+        fi
     else
-        pattern="^[[:space:]]*bindd\?[[:space:]]*=[[:space:]]*SUPER SHIFT,[[:space:]]*${key},"
-    fi
-    local match
-    match=$(grep -rh "$pattern" \
-        "$HOME/.local/share/omarchy/default/hypr/" \
-        "$HOME/.config/hypr/" \
-        2>/dev/null | grep -v "nowtes" | head -1 || true)
-    if [ -n "$match" ]; then
-        desc=$(echo "$match" | sed -n 's/.*bindd = [^,]*, [^,]*, \([^,]*\),.*/\1/p')
-        [ -z "$desc" ] && desc="unknown"
-        echo "$desc"
+        local pattern
+        if [ "$mod" = "SUPER" ]; then
+            pattern="^[[:space:]]*bindd\?[[:space:]]*=[[:space:]]*SUPER,[[:space:]]*${key},"
+        else
+            pattern="^[[:space:]]*bindd\?[[:space:]]*=[[:space:]]*SUPER SHIFT,[[:space:]]*${key},"
+        fi
+        local match
+        match=$(grep -rh "$pattern" \
+            "$HOME/.local/share/omarchy/default/hypr/" \
+            "$HOME/.config/hypr/" \
+            2>/dev/null | grep -v "nowtes" | head -1 || true)
+        if [ -n "$match" ]; then
+            desc=$(echo "$match" | sed -n 's/.*bindd = [^,]*, [^,]*, \([^,]*\),.*/\1/p')
+            [ -z "$desc" ] && desc="unknown"
+            echo "$desc"
+        fi
     fi
 }
 
@@ -141,12 +170,14 @@ case "$BIND_CHOICE" in
     1)
         BIND_MOD="SUPER"
         BIND_KEY="N"
+        BIND_LUA="SUPER + N"
         NEEDS_UNBIND=$( [ -n "$CONFLICT_SUPER" ] && echo true || echo false )
         ok "Keybinding: SUPER + N"
         ;;
     *)
         BIND_MOD="SUPER SHIFT"
         BIND_KEY="N"
+        BIND_LUA="SUPER + SHIFT + N"
         NEEDS_UNBIND=$( [ -n "$CONFLICT_SHIFT" ] && echo true || echo false )
         ok "Keybinding: SUPER + SHIFT + N"
         ;;
@@ -156,42 +187,86 @@ esac
 echo ""
 info "Configuring Hyprland..."
 
-if [ ! -f "$HYPR_CONF" ]; then
-    err "Hyprland config not found at $HYPR_CONF"
-    echo "Add these lines manually to your Hyprland config:"
-    echo ""
-    echo "  windowrule = float on, match:class $APPCLASS"
-    echo "  windowrule = size 900 600, match:class $APPCLASS"
-    echo "  windowrule = center 1, match:class $APPCLASS"
-    echo "  windowrule = workspace special:$APPCLASS silent, match:class $APPCLASS"
-    $NEEDS_UNBIND && echo "  unbind = $BIND_MOD, N"
-    echo "  bindd = $BIND_MOD, $BIND_KEY, Nowtes, exec, $BIN_DIR/nowtes-toggle"
-    exit 0
+if $LUA_MODE; then
+    # Clean up any legacy ini-style block from hyprland.conf
+    if [ -f "$HYPR_CONF" ] && grep -q "match:class $APPCLASS\|nowtes-toggle" "$HYPR_CONF" 2>/dev/null; then
+        info "Removing legacy Nowtes config from hyprland.conf..."
+        sed -i "/# >>> Nowtes/,/# <<< Nowtes/d" "$HYPR_CONF"
+        sed -i "/match:class ${APPCLASS}/d" "$HYPR_CONF"
+        sed -i "/nowtes-toggle/d" "$HYPR_CONF"
+        sed -i "/unbind.*# nowtes/d" "$HYPR_CONF"
+        sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$HYPR_CONF"
+    fi
+
+    # Remove previous Nowtes Lua blocks from both files (idempotent reinstall)
+    for lua_file in "$HYPR_LUA" "$BINDINGS_LUA"; do
+        if [ -f "$lua_file" ] && grep -qi "nowtes" "$lua_file"; then
+            info "Removing previous Nowtes config from $(basename "$lua_file")..."
+            sed -i "/-- >>> Nowtes/,/-- <<< Nowtes/d" "$lua_file"
+            sed -i '/[Nn]owtes\|hl\.unbind("SUPER + N")\|hl\.unbind("SUPER + SHIFT + N")/d' "$lua_file"
+            sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$lua_file"
+        fi
+    done
+
+    # Append window rules to hyprland.lua
+    {
+        echo ""
+        echo "-- >>> Nowtes"
+        local lua_match="${APPCLASS//./%.}"
+        echo "o.window(\"^${lua_match}$\", { float = true, fullscreen = false, size = { 900, 600 }, center = true, workspace = \"special:${APPCLASS} silent\" })"
+        echo "-- <<< Nowtes"
+    } >> "$HYPR_LUA"
+    ok "Window rules added to hyprland.lua"
+
+    # Append binding to bindings.lua
+    {
+        echo ""
+        echo "-- >>> Nowtes"
+        $NEEDS_UNBIND && echo "hl.unbind(\"${BIND_LUA}\")"
+        echo "o.bind(\"${BIND_LUA}\", \"Nowtes\", \"$BIN_DIR/nowtes-toggle\")"
+        echo "-- <<< Nowtes"
+    } >> "$BINDINGS_LUA"
+    ok "Keybinding added to bindings.lua"
+
+else
+    # Legacy ini config path
+    if [ ! -f "$HYPR_CONF" ]; then
+        err "Hyprland config not found at $HYPR_CONF"
+        echo "Add these lines manually to your Hyprland config:"
+        echo ""
+        echo "  windowrule = float on, match:class $APPCLASS"
+        echo "  windowrule = size 900 600, match:class $APPCLASS"
+        echo "  windowrule = center 1, match:class $APPCLASS"
+        echo "  windowrule = workspace special:$APPCLASS silent, match:class $APPCLASS"
+        $NEEDS_UNBIND && echo "  unbind = $BIND_MOD, N"
+        echo "  bindd = $BIND_MOD, $BIND_KEY, Nowtes, exec, $BIN_DIR/nowtes-toggle"
+        exit 0
+    fi
+
+    # Remove any previous nowtes config block (idempotent reinstall)
+    if grep -q "match:class $APPCLASS\|nowtes-toggle" "$HYPR_CONF"; then
+        info "Removing previous Nowtes config..."
+        sed -i "/# >>> Nowtes/,/# <<< Nowtes/d" "$HYPR_CONF" 2>/dev/null || true
+        sed -i "/match:class ${APPCLASS}/d" "$HYPR_CONF"
+        sed -i "/nowtes-toggle/d" "$HYPR_CONF"
+        sed -i "/unbind.*# nowtes/d" "$HYPR_CONF"
+        sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$HYPR_CONF"
+    fi
+
+    # Append new config block
+    {
+        echo ""
+        echo "# >>> Nowtes"
+        echo "windowrule = float on, match:class $APPCLASS"
+        echo "windowrule = size 900 600, match:class $APPCLASS"
+        echo "windowrule = center 1, match:class $APPCLASS"
+        echo "windowrule = workspace special:$APPCLASS silent, match:class $APPCLASS"
+        $NEEDS_UNBIND && echo "unbind = $BIND_MOD, N  # nowtes"
+        echo "bindd = $BIND_MOD, $BIND_KEY, Nowtes, exec, $BIN_DIR/nowtes-toggle"
+        echo "# <<< Nowtes"
+    } >> "$HYPR_CONF"
 fi
 
-# Remove any previous nowtes config block (idempotent reinstall)
-if grep -q "match:class $APPCLASS\|nowtes-toggle" "$HYPR_CONF"; then
-    info "Removing previous Nowtes config..."
-    sed -i "/# >>> Nowtes/,/# <<< Nowtes/d" "$HYPR_CONF" 2>/dev/null || true
-    sed -i "/match:class ${APPCLASS}/d" "$HYPR_CONF"
-    sed -i "/nowtes-toggle/d" "$HYPR_CONF"
-    sed -i "/unbind.*# nowtes/d" "$HYPR_CONF"
-    # Clean up trailing blank lines
-    sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$HYPR_CONF"
-fi
-
-# Append new config block
-{
-    echo ""
-    echo "# >>> Nowtes"
-    echo "windowrule = float on, match:class $APPCLASS"
-    echo "windowrule = size 900 600, match:class $APPCLASS"
-    echo "windowrule = center 1, match:class $APPCLASS"
-    echo "windowrule = workspace special:$APPCLASS silent, match:class $APPCLASS"
-    $NEEDS_UNBIND && echo "unbind = $BIND_MOD, N  # nowtes"
-    echo "bindd = $BIND_MOD, $BIND_KEY, Nowtes, exec, $BIN_DIR/nowtes-toggle"
-    echo "# <<< Nowtes"
-} >> "$HYPR_CONF"
 ok "Hyprland config updated"
 
 # --- Reload Hyprland ---
